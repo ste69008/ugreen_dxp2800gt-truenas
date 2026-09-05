@@ -1,0 +1,11 @@
+services:
+  brisa:
+    image: ghcr.io/brunoorsolon/brisa:latest
+    container_name: brisa
+    restart: unless-stopped
+    privileged: true
+    network_mode: bridge
+    ports:
+      - "9595:9595"
+    volumes:
+      - /mnt/slow/brisa:/data
