@@ -157,3 +157,13 @@ docker-compose/coolercontrold/
   scripts/coolercontrold-watchdog.sh   fan failsafe, run every 2 min via cron
   scripts/coolercontrold-backup.sh     manual config backup
 ```
+
+## License
+
+[GPL-2.0-only](LICENSE), matching the `SPDX-License-Identifier: GPL-2.0-only`
+header UGREEN ships on `driver/upstream/ug_201x.c` and
+`driver/upstream/leds-sio-201x.c`, which this project's own driver patch and
+build files (`driver/ug_201x-hwmon.patch`, `driver/ug_201x-hwmon.c`,
+`driver/Makefile`) are derived from and must stay under. The rest of this
+repo (LED daemon, watchdog, boot script, docs) is released under the same
+license for simplicity.
