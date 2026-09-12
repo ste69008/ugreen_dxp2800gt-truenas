@@ -1,0 +1,10 @@
+services:
+  coolercontrold:
+    image: coolercontrol/coolercontrold
+    container_name: coolercontrold
+    restart: unless-stopped
+    privileged: true
+    ports:
+      - "11987:11987"
+    volumes:
+      - /mnt/slow/docker/coolercontrold:/etc/coolercontrol

@@ -1,0 +1,12 @@
+[Unit]
+Description=UGREEN front-panel LED activity indicator (power/disk/network)
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /mnt/slow/scripts/ugreen-led-activity.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

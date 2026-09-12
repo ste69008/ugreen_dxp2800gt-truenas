@@ -1,0 +1,223 @@
+--- a/drivers/ugreen/ug_201x.c
++++ b/drivers/ugreen/ug_201x.c
+@@ -21,6 +21,7 @@
+ #include <linux/dmi.h>
+ #include <linux/time.h>
+ #include <linux/delay.h>
++#include <linux/hwmon.h>
+ //#include <misc/ugreen_product.h>
+ 
+ #undef pr_fmt
+@@ -326,6 +327,22 @@
+ 
+     return rc;
+ }
++
++/* Read back the current PWM duty cycle, mirroring SetFanDuty().
++ * The register stores a 0-100 percentage; callers expect the usual
++ * hwmon 0-255 pwm scale, so the conversion happens in the hwmon read
++ * callback, not here (this keeps the function symmetrical with the
++ * register layout, like GetFanRpm()). */
++static inline int GetFanDuty(int FanId)
++{
++    int val = 0;
++
++    if (FanId <= 1) {
++        val = Chipsea_Host2ec_Inb(ec_addr_port, FAN0_DUTY + FanId);//200053f4-200053f5
++    }
++
++    return val;
++}
+ /* pin 0 is krst# */
+ static void Wdt_init(int pin, int timeout)
+ {
+@@ -723,6 +740,166 @@
+ 	.min_timeout = 30,
+ };
+ 
++/* ---------------------------------------------------------------------
++ * hwmon interface
++ *
++ * Exposes the same CPU/board NTC temperatures and CPU/system fan RPM
++ * values as /proc/it86/{temp,fan}, but through the standard Linux
++ * hwmon framework so that lm-sensors ("sensors" command) and any tool
++ * built on top of it (Netdata, Brisa, node_exporter, etc.) can read
++ * them from /sys/class/hwmon/hwmonX/ without knowing anything about
++ * this driver.
++ * --------------------------------------------------------------------- */
++
++static const char * const ug201x_temp_label[] = {
++	"cpu_temp",
++	"board_temp",
++};
++
++static const char * const ug201x_fan_label[] = {
++	"cpufan",
++	"sysfan1",
++};
++
++static umode_t ug201x_hwmon_is_visible(const void *data,
++					enum hwmon_sensor_types type,
++					u32 attr, int channel)
++{
++	switch (type) {
++	case hwmon_temp:
++		if (channel >= ARRAY_SIZE(ug201x_temp_label))
++			return 0;
++		if (attr == hwmon_temp_input || attr == hwmon_temp_label)
++			return 0444;
++		return 0;
++	case hwmon_fan:
++		if (channel >= ARRAY_SIZE(ug201x_fan_label))
++			return 0;
++		if (attr == hwmon_fan_input || attr == hwmon_fan_label)
++			return 0444;
++		return 0;
++	case hwmon_pwm:
++		/* channel 0 = cpufan, channel 1 = sysfan1, matching the
++		 * fan/temp channel numbering above so tools like Brisa
++		 * pair pwmX with fanX automatically. */
++		if (channel > 1)
++			return 0;
++		if (attr == hwmon_pwm_input)
++			return 0644;
++		return 0;
++	default:
++		return 0;
++	}
++}
++
++static int ug201x_hwmon_read(struct device *dev,
++			      enum hwmon_sensor_types type,
++			      u32 attr, int channel, long *val)
++{
++	int rc = 0;
++
++	if (mutex_lock_interruptible(&ug_201x_lock))
++		return -EINTR;
++
++	switch (type) {
++	case hwmon_temp:
++		if (attr != hwmon_temp_input) {
++			rc = -EOPNOTSUPP;
++			break;
++		}
++		/* GetNTCTemperature() returns a raw value in degrees C,
++		 * hwmon wants milli-degrees C. */
++		*val = (long)GetNTCTemperature(channel) * 1000;
++		break;
++	case hwmon_fan:
++		if (attr != hwmon_fan_input) {
++			rc = -EOPNOTSUPP;
++			break;
++		}
++		/* GetFanRpm() already returns RPM, which is what hwmon
++		 * expects for fanX_input. */
++		*val = (long)GetFanRpm(channel);
++		break;
++	case hwmon_pwm:
++		if (attr != hwmon_pwm_input) {
++			rc = -EOPNOTSUPP;
++			break;
++		}
++		/* GetFanDuty() returns a 0-100 percentage; hwmon's pwmX
++		 * convention is 0-255. */
++		*val = ((long)GetFanDuty(channel) * 255) / 100;
++		break;
++	default:
++		rc = -EOPNOTSUPP;
++		break;
++	}
++
++	mutex_unlock(&ug_201x_lock);
++	return rc;
++}
++
++static int ug201x_hwmon_write(struct device *dev,
++			       enum hwmon_sensor_types type,
++			       u32 attr, int channel, long val)
++{
++	if (type != hwmon_pwm || attr != hwmon_pwm_input)
++		return -EOPNOTSUPP;
++	if (channel > 1)
++		return -EINVAL;
++	if (val < 0 || val > 255)
++		return -EINVAL;
++
++	/* SetFanDuty() already takes/releases ug_201x_lock itself and
++	 * already expects a 0-255 value, so it is called directly here
++	 * without an extra lock (that would deadlock) or extra scaling. */
++	return SetFanDuty((int)channel, (int)val);
++}
++
++static int ug201x_hwmon_read_string(struct device *dev,
++				     enum hwmon_sensor_types type,
++				     u32 attr, int channel, const char **str)
++{
++	switch (type) {
++	case hwmon_temp:
++		if (attr != hwmon_temp_label)
++			return -EOPNOTSUPP;
++		*str = ug201x_temp_label[channel];
++		return 0;
++	case hwmon_fan:
++		if (attr != hwmon_fan_label)
++			return -EOPNOTSUPP;
++		*str = ug201x_fan_label[channel];
++		return 0;
++	default:
++		return -EOPNOTSUPP;
++	}
++}
++
++static const struct hwmon_ops ug201x_hwmon_ops = {
++	.is_visible	= ug201x_hwmon_is_visible,
++	.read		= ug201x_hwmon_read,
++	.write		= ug201x_hwmon_write,
++	.read_string	= ug201x_hwmon_read_string,
++};
++
++static const struct hwmon_channel_info *ug201x_hwmon_info[] = {
++	HWMON_CHANNEL_INFO(temp,
++			    HWMON_T_INPUT | HWMON_T_LABEL,
++			    HWMON_T_INPUT | HWMON_T_LABEL),
++	HWMON_CHANNEL_INFO(fan,
++			    HWMON_F_INPUT | HWMON_F_LABEL,
++			    HWMON_F_INPUT | HWMON_F_LABEL),
++	HWMON_CHANNEL_INFO(pwm,
++			    HWMON_PWM_INPUT,
++			    HWMON_PWM_INPUT),
++	NULL
++};
++
++static const struct hwmon_chip_info ug201x_hwmon_chip_info = {
++	.ops	= &ug201x_hwmon_ops,
++	.info	= ug201x_hwmon_info,
++};
++
+ static int procfs_create(void)
+ {
+ 	struct proc_dir_entry *entry = NULL;
+@@ -808,6 +985,22 @@
+ #endif 
+ 	procfs_create();
+ 
++	{
++		struct device *hwmon_dev;
++
++		hwmon_dev = devm_hwmon_device_register_with_info(&pdev->dev,
++						"ug201x", NULL,
++						&ug201x_hwmon_chip_info, NULL);
++		if (IS_ERR(hwmon_dev)) {
++			/* Not fatal: keep the /proc interface working even
++			 * if hwmon registration fails for some reason. */
++			pr_err("failed to register hwmon device (err=%ld)\n",
++			       PTR_ERR(hwmon_dev));
++		} else {
++			pr_info("hwmon device registered (sensors will show it as \"ug201x\")\n");
++		}
++	}
++
+ 	ug_201_leds_init(pdev);
+ 
+ 	return 0;
