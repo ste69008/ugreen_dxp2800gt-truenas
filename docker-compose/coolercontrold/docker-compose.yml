@@ -1,10 +1,24 @@
+# coolercontrold - fan curves for the ug201x hwmon device (web UI on port 11987).
+#
+# Deployed to /mnt/<pool>/docker-compose/coolercontrold/ next to its .env (see .env.example) and
+# run as a TrueNAS Custom App whose YAML is only an include of this file (scripts/app-install.sh):
+#   include:
+#     - /mnt/<pool>/docker-compose/coolercontrold/docker-compose.yml
+#   services: {}
+# so the compose definition stays in this repo, not in TrueNAS's config database.
+#
+# Data (config, calibration, curves, password/session files): dataset <pool>/apps-coolercontrold,
+# created by preconfigure.sh - survives the app being deleted/recreated and TrueNAS updates.
+
 services:
   coolercontrold:
-    image: coolercontrol/coolercontrold
+    image: coolercontrol/coolercontrold:${COOLERCONTROL_TAG:-5.0.1} # Pinned: bump deliberately.
     container_name: coolercontrold
     restart: unless-stopped
-    privileged: true
+    privileged: true # Writes the hwmon pwm channels in /sys.
     ports:
-      - "11987:11987"
+      # COOLERCONTROL_BIND (.env): NAS management IP to keep the UI off other interfaces/VLANs,
+      # 0.0.0.0 for all of them. The watchdog uses the same address.
+      - "${COOLERCONTROL_BIND:-0.0.0.0}:11987:11987"
     volumes:
-      - /mnt/slow/docker/coolercontrold:/etc/coolercontrol
+      - ${APPS_ROOT:-/mnt/slow}/apps-coolercontrold/config:/etc/coolercontrol

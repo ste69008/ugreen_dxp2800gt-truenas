@@ -6,7 +6,13 @@
 
 set -uo pipefail
 
-API_URL="http://localhost:11987/handshake"
+# Listen address from the stack's .env (COOLERCONTROL_BIND), same as the published port.
+STACK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+COOLERCONTROL_BIND="$(sed -n 's/^COOLERCONTROL_BIND=//p' "$STACK_DIR/.env" 2>/dev/null | tr -d '"'"'"' ')"
+API_HOST="${COOLERCONTROL_BIND:-0.0.0.0}"
+[ "$API_HOST" = "0.0.0.0" ] && API_HOST="localhost"
+
+API_URL="http://${API_HOST}:11987/handshake"
 TIMEOUT=5
 FAILSAFE_PERCENT=60
 PWM_MAX=255

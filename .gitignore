@@ -1,0 +1,2 @@
+# Per-NAS settings of the coolercontrold stack (copied from .env.example on the NAS).
+docker-compose/coolercontrold/.env

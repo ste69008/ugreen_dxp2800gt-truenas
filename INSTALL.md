@@ -69,55 +69,59 @@ current `uname -r` before continuing.
 
 ## 4. Deploy coolercontrold
 
-Installed as a TrueNAS **Custom App** rather than a bare `docker compose`
-stack, so TrueNAS's own app framework (not just the Docker daemon) starts it
-on every boot, and it shows up under **Apps** in the UI.
+Same layout as any other stack on this NAS:
 
-Via the UI: **Apps → Discover Apps → Custom App → Install via YAML**, app
-name `coolercontrold`, and paste the contents of
-`docker-compose/coolercontrold/docker-compose.yml` as-is (no
-`container_name` needed — TrueNAS names the container itself, currently
-`ix-coolercontrold-coolercontrold-1`; nothing in this repo depends on that
-name).
+- the stack directory (compose file, `.env`, scripts) lives in
+  `/mnt/slow/docker-compose/coolercontrold/`;
+- its data (config, calibration, curves) lives in the dataset
+  `slow/apps-coolercontrold/config`, created by `preconfigure.sh` — it survives
+  the app being deleted and recreated, and TrueNAS updates;
+- the TrueNAS **Custom App** `coolercontrold` only *includes* the compose file
+  (`include:` + `services: {}`), so the definition stays in this repo, not in
+  TrueNAS's config database. TrueNAS still starts it on every boot and shows
+  it under **Apps**.
 
-Or via the API, from the repo root:
+Copy the stack and create its `.env` (set `COOLERCONTROL_BIND` to the NAS
+management IP to keep the web UI off the other interfaces/VLANs, and
+`APPS_ROOT` if your pool isn't `slow`):
 
 ```bash
-python3 -c "
-import json
-compose = open('docker-compose/coolercontrold/docker-compose.yml').read()
-json.dump({'app_name': 'coolercontrold', 'custom_app': True,
-           'custom_compose_config_string': compose},
-          open('/tmp/coolercontrold-app.json', 'w'))
+ssh <nas> "mkdir -p /tmp/cc && sudo mkdir -p /mnt/slow/docker-compose/coolercontrold"
+scp -r docker-compose/coolercontrold/{docker-compose.yml,.env.example,preconfigure.sh,scripts} <nas>:/tmp/cc/
+ssh <nas> "
+  sudo cp -r /tmp/cc/. /mnt/slow/docker-compose/coolercontrold/ && rm -rf /tmp/cc
+  cd /mnt/slow/docker-compose/coolercontrold
+  sudo cp -n .env.example .env && sudo chmod 600 .env
+  sudo chmod +x preconfigure.sh scripts/*.sh
 "
-scp /tmp/coolercontrold-app.json <nas>:/tmp/
-ssh <nas> 'midclt call app.create "$(cat /tmp/coolercontrold-app.json)"'
+ssh -t <nas> "sudoedit /mnt/slow/docker-compose/coolercontrold/.env"   # COOLERCONTROL_BIND, APPS_ROOT
 ```
 
-(`app.create` returns a job id; it finishes in a few seconds since the
-image is a plain `docker pull` — check with
-`midclt call core.get_jobs '[["id","=","<id>"]]'` if you want to confirm
-before moving on.)
+Create the datasets, then the app:
 
-Either way, `/mnt/slow/docker/coolercontrold` (the calibration/curves data)
-is a plain host-path bind mount, kept outside the app's own managed
-storage — it survives deleting and recreating the app, and is what makes
-migrating an existing plain `docker compose` deployment to a Custom App
-lossless (`docker compose down` the old stack first, then create the app;
-the new container picks the existing data straight back up).
+```bash
+ssh <nas> "sudo bash /mnt/slow/docker-compose/coolercontrold/preconfigure.sh --pool slow"
+ssh <nas> "sudo bash /mnt/slow/docker-compose/coolercontrold/scripts/app-install.sh"
+```
 
-The web UI is on `http://<nas>:11987`; set up your fan curves there once the
-`ug201x` device shows up in it.
+`app-install.sh` creates the app, or — if an app named `coolercontrold`
+already exists, e.g. one installed by pasting the full YAML — switches it to
+the include in place. Coming from the previous layout of this repo (data in
+`/mnt/slow/docker/coolercontrold`), `preconfigure.sh` copies that data into
+the new dataset if it's still empty; delete the old directory once the app
+runs fine.
+
+To change the stack later (image tag, port binding): edit the files in
+`/mnt/slow/docker-compose/coolercontrold/`, then **Apps → coolercontrold →
+Redeploy** (or `midclt call -j app.redeploy coolercontrold`).
+
+The web UI is on `http://<COOLERCONTROL_BIND>:11987`; set up your fan curves
+there once the `ug201x` device shows up in it.
 
 ## 5. Deploy the fan watchdog
 
-```bash
-ssh <nas> "sudo mkdir -p /mnt/slow/docker-compose/coolercontrold/scripts"
-scp docker-compose/coolercontrold/scripts/coolercontrold-watchdog.sh \
-    docker-compose/coolercontrold/scripts/coolercontrold-backup.sh \
-    <nas>:/mnt/slow/docker-compose/coolercontrold/scripts/
-ssh <nas> "sudo chmod +x /mnt/slow/docker-compose/coolercontrold/scripts/*.sh"
-```
+The watchdog and backup scripts were copied with the stack in step 4
+(`scripts/`); they read `COOLERCONTROL_BIND` / `APPS_ROOT` from its `.env`.
 
 Register it as a **TrueNAS Cron Job** (System Settings → Advanced → Cron
 Jobs in the UI, or via the API as below) — not a plain `crontab`, so it
@@ -136,7 +140,8 @@ midclt call cronjob.create '{
 ```
 
 `coolercontrold-backup.sh` is intentionally *not* scheduled — run it by hand
-before anything risky (e.g. before a TrueNAS update).
+before anything risky (e.g. before a TrueNAS update). It writes a zip of
+`apps-coolercontrold/config` to `/mnt/slow/backup/`.
 
 ## 6. Deploy the LED activity service
 
@@ -199,7 +204,7 @@ lsmod | grep ug201x_full
 ls /sys/class/leds/ | grep -E 'power|disk|network'
 for d in /sys/class/hwmon/hwmon*; do cat $d/name; done | grep ug201x
 systemctl is-active ugreen-led-activity.service
-sudo docker ps --filter name=coolercontrold   # matches ix-coolercontrold-coolercontrold-1
+sudo docker ps --filter name=coolercontrold   # container "coolercontrold", project ix-coolercontrold
 journalctl -t ug201x-boot --no-pager -n 20
 ```
 

@@ -48,17 +48,17 @@ ug201x_full.ko  →  /sys/class/hwmon/hwmonX (chip "ug201x")  →  coolercontrol
   interface working side by side.
 
 - **`docker-compose/coolercontrold/`** — [CoolerControl](https://gitlab.com/coolercontrol/coolercontrol)'s
-  daemon, installed as a TrueNAS **Custom App** (Apps → Discover Apps →
-  Custom App → Install via YAML, using `docker-compose.yml` as-is) bound to
-  the `ug201x` hwmon device. TrueNAS runs it as container
-  `ix-coolercontrold-coolercontrold-1`, but that name is an implementation
-  detail — nothing else in this repo depends on it, since the watchdog only
-  talks to it over HTTP and reads/writes sysfs directly. It applies
-  temperature→PWM curves per fan and exposes a web UI on port `11987` to
-  edit them. Its calibration/curves are persisted under
-  `/mnt/slow/docker/coolercontrold`, a plain host-path bind mount kept
-  outside the app's own managed storage so it survives the app being
-  deleted and recreated.
+  daemon, bound to the `ug201x` hwmon device. It applies temperature→PWM
+  curves per fan and exposes a web UI on port `11987` to edit them. Laid out
+  like any other stack on the NAS: the directory is deployed to
+  `/mnt/slow/docker-compose/coolercontrold/` with a local `.env`
+  (`.env.example`: pool path, listen address), its data
+  (config/calibration/curves) lives in the `slow/apps-coolercontrold/config`
+  dataset (`preconfigure.sh`), and the TrueNAS **Custom App** `coolercontrold`
+  only `include:`s the compose file (`scripts/app-install.sh`) — the
+  definition stays in this repo, the data survives the app being deleted and
+  recreated. Nothing depends on the container name: the watchdog talks to it
+  over HTTP and reads/writes sysfs directly.
 
   - `scripts/coolercontrold-watchdog.sh` — runs every 2 minutes via a
     TrueNAS cron job. If `coolercontrold`'s API doesn't answer, it writes a
@@ -132,8 +132,9 @@ filesystem) that runs on every boot to:
    persistent copy if it's missing, and (re-)enable the service.
 
 `coolercontrold` needs no equivalent script: as a TrueNAS Custom App it's
-started by TrueNAS's own app framework on every boot (its app definition
-lives in TrueNAS's config database, not on the read-only filesystem). Its
+started by TrueNAS's own app framework on every boot (its app definition —
+an include of the compose file on the pool — lives in TrueNAS's config
+database, not on the read-only filesystem). Its
 watchdog is a TrueNAS **Cron Job** (also config-database-backed), not a
 plain crontab entry.
 
@@ -153,7 +154,10 @@ led/
   ugreen-led-activity.py       activity-LED daemon
   ugreen-led-activity.service  its systemd unit
 docker-compose/coolercontrold/
-  docker-compose.yml           coolercontrold container (installed as a TrueNAS Custom App)
+  docker-compose.yml           coolercontrold container (included by the TrueNAS Custom App)
+  .env.example                 per-NAS settings (pool path, listen address) -> .env on the NAS
+  preconfigure.sh              creates the apps-coolercontrold datasets (+ migrates old data)
+  scripts/app-install.sh       creates/updates the Custom App as an include of the compose file
   scripts/coolercontrold-watchdog.sh   fan failsafe, run every 2 min via cron
   scripts/coolercontrold-backup.sh     manual config backup
 ```

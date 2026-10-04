@@ -5,8 +5,13 @@
 
 set -euo pipefail
 
-DEST_DIR="/mnt/slow/backup"
-SOURCE_DIR="/mnt/slow/docker/coolercontrold"
+# Pool mountpoint from the stack's .env (APPS_ROOT), /mnt/slow by default.
+STACK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+APPS_ROOT="$(sed -n 's/^APPS_ROOT=//p' "$STACK_DIR/.env" 2>/dev/null | tr -d '"'"'"' ')"
+APPS_ROOT="${APPS_ROOT:-/mnt/slow}"
+
+DEST_DIR="$APPS_ROOT/backup"
+SOURCE_DIR="$APPS_ROOT/apps-coolercontrold/config"
 
 if [ ! -d "$SOURCE_DIR" ]; then
     echo "ERROR: source directory not found: $SOURCE_DIR" >&2
