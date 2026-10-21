@@ -115,6 +115,19 @@ To change the stack later (image tag, port binding): edit the files in
 `/mnt/slow/docker-compose/coolercontrold/`, then **Apps → coolercontrold →
 Redeploy** (or `midclt call -j app.redeploy coolercontrold`).
 
+To update the image, run from the workstation, in this repo:
+
+```bash
+docker-compose/coolercontrold/scripts/update.sh <nas> <version>   # e.g. truenas 5.1.2
+```
+
+It snapshots `apps-coolercontrold` (`@before-<version>`), pulls the image,
+bumps `COOLERCONTROL_TAG`'s default in `docker-compose.yml` (here and on the
+NAS), redeploys and waits for `/handshake`. If the new version doesn't answer
+within 2 minutes it rolls everything back (compose file, snapshot) and
+restarts the previous version. Then commit `docker-compose.yml`, and delete
+the snapshot once the new version is trusted.
+
 The web UI is on `http://<COOLERCONTROL_BIND>:11987`; set up your fan curves
 there once the `ug201x` device shows up in it.
 
