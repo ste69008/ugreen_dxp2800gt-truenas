@@ -16,6 +16,12 @@ services:
     container_name: coolercontrold
     restart: unless-stopped
     privileged: true # Writes the hwmon pwm channels in /sys.
+    environment:
+      # epoll instead of io_uring: on kernels 6.5-6.14 (TrueNAS 25.10: 6.12) the daemon's idle wait
+      # inside io_uring is counted as iowait (~75 % shown with no real I/O, polluting dashboards and
+      # alerts). From kernel 6.15 the daemon opts out by itself and this can go. Cost: a few more
+      # wakeups/threads. https://docs.coolercontrol.org/daemon/startup.html#phantom-iowait-on-one-cpu-core
+      CC_RUNTIME_DRIVER: epoll
     ports:
       # COOLERCONTROL_BIND (.env): NAS management IP to keep the UI off other interfaces/VLANs,
       # 0.0.0.0 for all of them. The watchdog uses the same address.
