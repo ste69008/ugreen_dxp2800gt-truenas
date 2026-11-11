@@ -10,6 +10,23 @@ update — see [README.md § Persistence](README.md#persistence) for why. Do
 **not** shortcut this by putting files under `/usr/local/sbin` or similar;
 they will silently disappear on the next update.
 
+## Where everything lives on the NAS
+
+| What | Path on the NAS | Persistent across updates? |
+|---|---|---|
+| Driver sources (`ug_201x.c` = the hwmon-patched file, `leds-sio-201x.c`, `Makefile`) and the built `ug201x_full.ko` | `/mnt/slow/scripts/ug201x/` | yes (pool) |
+| LED daemon and its unit (persistent copies) | `/mnt/slow/scripts/ugreen-led-activity.py`, `/mnt/slow/scripts/ugreen-led-activity.service` | yes (pool) |
+| Boot script (reload module, restore LED unit) | `/mnt/slow/scripts/ug201x-boot.sh` | yes (pool) |
+| LED unit actually run by systemd | `/etc/systemd/system/ugreen-led-activity.service` | not guaranteed; the boot script restores it |
+| coolercontrold stack: `docker-compose.yml`, `.env`, `preconfigure.sh`, `scripts/` (watchdog, backup, update, app-install) | `/mnt/slow/docker-compose/coolercontrold/` | yes (pool) |
+| coolercontrold data: config, calibrations, curves, password and session files | `/mnt/slow/apps-coolercontrold/config` (dataset `slow/apps-coolercontrold`, mounted at `/etc/coolercontrol` in the container) | yes (pool) |
+| coolercontrold backups (zip, from `coolercontrold-backup.sh`) | `/mnt/slow/backup/` | yes (pool) |
+| Boot script registration, watchdog cron job, `coolercontrold` Custom App | TrueNAS config database (Init/Shutdown Scripts, Cron Jobs, Apps) | yes |
+| Module rebuild / `insmod` error log of the boot script | `/tmp/ug201x-build.log` | no (tmpfs) |
+
+The previous layout kept coolercontrold's data in `/mnt/slow/docker/coolercontrold`;
+[step 4](#4-deploy-coolercontrold) migrates it.
+
 ## 1. Copy the driver sources to the NAS
 
 ```bash
@@ -129,7 +146,11 @@ restarts the previous version. Then commit `docker-compose.yml`, and delete
 the snapshot once the new version is trusted.
 
 The web UI is on `http://<COOLERCONTROL_BIND>:11987`; set up your fan curves
-there once the `ug201x` device shows up in it.
+there once the `ug201x` device shows up in it. See
+[README.md § Fan curves](README.md#fan-curves) for what is configured now and
+the guidelines (25 % minimum, drive-aware system fan); the curves live in the
+data dataset, not in this repo, so run `coolercontrold-backup.sh` after
+changing them.
 
 ## 5. Deploy the fan watchdog
 
@@ -151,6 +172,20 @@ midclt call cronjob.create '{
   "description": "coolercontrold healthcheck -> fan failsafe 60%"
 }'
 ```
+
+`"stdout": false` matters: the job's standard output is what TrueNAS e-mails
+(to the e-mail address of `root`, so set one under Credentials → Local Users
+and configure System → Email), and the watchdog only prints when something
+is wrong. `"stderr": true` hides stderr, which the script doesn't use. What
+triggers a mail, and when, is described in
+[README.md § Alerts](README.md#alerts).
+
+To check the whole chain, stop the app (`midclt call app.stop coolercontrold`):
+the fans go to 60 % at the first run (within 2 minutes), the `ALERT` mail is
+sent at the second one, and `midclt call app.start coolercontrold` brings the
+`RECOVERED` mail at the next run. Each run is also visible with
+`midclt call core.get_jobs '[["method","=","cronjob.run"]]'` (its `logs_excerpt`
+holds what was mailed) and in syslog (`grep coolercontrold-watchdog /var/log/syslog`).
 
 `coolercontrold-backup.sh` is intentionally *not* scheduled — run it by hand
 before anything risky (e.g. before a TrueNAS update). It writes a zip of
@@ -178,6 +213,10 @@ ssh <nas> "
 Note both the `/etc/systemd/system` copy (what systemd actually runs) and
 the `/mnt/slow/scripts` copy (the persistent source the boot script in the
 next step restores from if `/etc` gets wiped by an update).
+
+Don't run any other tool that writes the LED/fan registers from userspace
+(`ugreen_leds_cli`, ugreen-nas-control's `ugreen-led-ctl` / `ugreen-nas-fan`)
+next to this one — see [README.md § Architecture — LEDs](README.md#architecture--leds).
 
 ## 7. Set up persistence across reboots and updates
 

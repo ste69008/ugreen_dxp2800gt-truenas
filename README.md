@@ -1,4 +1,4 @@
-# ugreen_dxp2800gt-truenas_fan
+# ugreen_dxp2800gt-truenas
 
 Fan and front-panel LED control for the **UGREEN DXP2800GT** NAS running
 **TrueNAS SCALE**.
@@ -65,9 +65,96 @@ ug201x_full.ko  →  /sys/class/hwmon/hwmonX (chip "ug201x")  →  coolercontrol
     fixed 60% duty cycle directly to `pwm1`/`pwm2` via sysfs, bypassing the
     container entirely, so the fans never get stuck wherever they happened
     to be (or worse, off) if the container crashes or is being updated.
+    It also **e-mails alerts** (see [Alerts](#alerts)): coolercontrold
+    unreachable, a stalled fan, or the `ug201x` driver missing.
   - `scripts/coolercontrold-backup.sh` — manual (not scheduled) backup of
     the CoolerControl data directory (config, curves, session files) to a
     timestamped zip.
+
+### Fan curves
+
+The curves are **not versioned in this repo**: they live in CoolerControl's
+own config, `/mnt/slow/apps-coolercontrold/config/config.toml` (edited in the
+web UI), so `scripts/coolercontrold-backup.sh` is what protects them.
+
+As configured on 2026-11-11 (temperature °C → fan duty %, linear between
+points):
+
+| Fan | Profile | Temperature source | Points |
+|---|---|---|---|
+| `fan1` CPU | `CPU` | custom sensor `CPU (Moyenne)` (`sensor1`): average of the CPU die sensor (`k10temp`) and the EC's `cpu_temp` | 0→25, 40→30, 65→50, 80→80, 88→100 |
+| `fan2` system | `SYSFAN-Boîtier (max)`: *Mix / Max* of the two below, the higher duty wins | | |
+| | ↳ `SYSFAN` | EC board NTC (`ug201x` `temp2`) | 0→25, 40→30, 65→50, 85→75, 100→100 |
+| | ↳ `SYSFAN-Disques` | custom sensor `Disques (max)` (`sensor2`): hottest of the two drives' `drivetemp` | 30→25, 40→30, 45→40, 50→60, 55→80, 60→100 |
+
+Why they look like this:
+
+- **25 % minimum.** The kernel driver writes whatever it is given —
+  `SetFanDuty()` has no floor, and `pwm=0` stops the fan — so the curves are
+  the only protection. CoolerControl's own calibration of this unit
+  (2026-09-09) measured: both fans start at 12 % duty, keep spinning down to
+  10 % and are stopped at 8 %; at 25 % the system fan turns ~620 rpm and the
+  CPU fan ~2050 rpm. A 25 % floor is therefore about twice the stall point,
+  and keeps the system fan comfortably above the 400 rpm alert threshold
+  (it reads ~475 rpm at 20 %, ~250 rpm at 12 %). The
+  [ugreen-nas-control](#related-projects) project uses the same 25 % floor
+  for its DXP2800 GT, assuming a stall near 20 %, which this unit's
+  measurements don't show.
+- **The system fan follows the drives**, not only the board sensor: in a
+  2-bay NAS the disks are the main heat source, and the board NTC barely moves
+  during a scrub or a long SMART test. The drive curve reaches 100 % at 60 °C,
+  the drives' rated maximum.
+- **The CPU curve reaches 100 % at 88 °C** of the *averaged* sensor. The
+  average damps the die temperature (the EC sensor reads noticeably cooler
+  under load), so the die itself will be hotter than 88 °C at that point.
+  Switching `sensor1` from *Avg* to *Max* would make the curve follow the die.
+
+Notes for editing them:
+
+- A custom sensor refers to a drive by CoolerControl's device UID, which for a
+  drive is derived from its SCSI WWID (`sha256("Hwmon" + wwid)`). Replacing a
+  disk changes the UID, so `sensor2` must then be re-pointed to the new drive.
+- Don't lower the system fan curve below ~17 % duty: its speed would drop
+  under the 400 rpm alert thresholds below.
+- ZFS snapshots of the `slow/apps-coolercontrold` dataset
+  (`zfs list -t snapshot`) are the quick way back from a bad edit; stop the
+  app before restoring one.
+
+### Alerts
+
+Two independent layers:
+
+- **CoolerControl alert "Alerte de panne - sysfan1"** — a *channel alert* on
+  the RPM of `fan2`: it fires when the reading leaves 400–10000 rpm for more
+  than 5 s (warm-up), clears as soon as it is back in range, does not repeat
+  and does not shut the machine down. Its notification is a "desktop
+  notification", which the daemon only broadcasts to connected CoolerControl
+  clients (web UI, Qt app): with none open nobody is told, so it mostly serves
+  the UI's alert log and state. CoolerControl has no e-mail channel.
+- **E-mail from the watchdog** (`scripts/coolercontrold-watchdog.sh`, every
+  2 minutes). Whatever the script prints is e-mailed by TrueNAS: the cron job
+  mails its standard output to the e-mail address of the `root` user (subject
+  "Cron Job Run"), which needs TrueNAS's mail settings to be configured and
+  the job's *Hide Standard Output* left unchecked. The script prints nothing
+  when everything is fine.
+
+  | Condition | Threshold |
+  |---|---|
+  | coolercontrold's API doesn't answer (`/handshake`) | the fans are forced to 60 % at the **first** failed check; the mail follows at the second |
+  | CPU fan too slow or unreadable | below 800 rpm (`FAN1_MIN_RPM`) |
+  | System fan too slow or unreadable | below 400 rpm (`FAN2_MIN_RPM`) |
+  | `ug201x` hwmon device missing (module not loaded) | present / absent |
+
+  A condition is reported only once it has been seen on **two consecutive
+  runs** (`CONFIRM_RUNS`, so 2–4 minutes after it starts), which filters
+  transient readings such as a 0 rpm blip while the app restarts. Then you get
+  one `ALERT` mail, a `REMINDER` every 6 hours (`REMIND_SECONDS`) while it
+  lasts, and a `RECOVERED` mail when it ends. The thresholds are constants at
+  the top of the script; the messages are in English. The per-condition state
+  lives in `/run/coolercontrold-watchdog` (tmpfs, forgotten at reboot), and
+  every event is also logged to syslog under `coolercontrold-watchdog`.
+  Limits: an alert is 2–4 minutes late by design, and a NAS that is down
+  entirely can't mail anything — that needs monitoring from the outside.
 
 ## Architecture — LEDs
 
@@ -91,7 +178,22 @@ leds-sio-201x.c (same ug201x_full.ko)  →  /sys/class/leds/{power,disk1,disk2,n
   **Do not run `ugreen_leds_cli`** (the community `cs201x` userspace tool)
   at the same time as this service: it writes the same EC registers
   directly, bypassing the driver's cached state, and will desynchronize the
-  two (observed in testing).
+  two (observed in testing). The same goes for the userspace tools of
+  [ugreen-nas-control](#related-projects) (`ugreen-led-ctl`, `ugreen-nas-fan`):
+  they reach the same registers through `/dev/port`, with a lock the kernel
+  module doesn't share, and they only recognise UGREEN's own module names
+  (`leds_sio_201x`, `ug_201x`, `ug_sio201`), not `ug201x_full`.
+
+**Known limitation — no hardware blink.** The embedded controller can blink
+and "breathe" an LED by itself (mode 2 = blink, 3 = breath, period and
+on-time in 50 ms units). The stock driver only reaches that through LED
+triggers named `timer2` and `breath`, which don't exist on TrueNAS's kernel
+(checked on 25.10.7 / 6.12.105: the `trigger` list of the four LEDs has no
+`timer`, `timer2`, `breath` or `netdev`, only `disk-*`, `cpu*`, `kbd-*`, ...).
+That is why `ugreen-led-activity.py` switches the LEDs on and off in software
+twice a second instead. Exposing the EC's own modes would take a small driver
+patch (like the hwmon one); it would also allow states the script can't do
+today, such as a breathing power LED.
 
 ## Kernel driver
 
@@ -117,8 +219,13 @@ writable but not guaranteed to survive either. Only pool datasets
 (`/mnt/<pool>/...`) are guaranteed persistent across any update, including a
 full reinstall.
 
-So every file this project needs at runtime lives under `/mnt/slow/scripts/`,
-and **`boot/ug201x-boot.sh`** is registered as a TrueNAS **Init/Shutdown
+So everything this project needs at runtime lives on the pool: the driver
+sources, the built module, the LED daemon and the boot script under
+`/mnt/slow/scripts/`, the coolercontrold stack under
+`/mnt/slow/docker-compose/coolercontrold/` and its data in the
+`slow/apps-coolercontrold` dataset (full table in
+[INSTALL.md](INSTALL.md#where-everything-lives-on-the-nas)). The
+**`boot/ug201x-boot.sh`** script is registered as a TrueNAS **Init/Shutdown
 Script** (`POSTINIT`, stored in TrueNAS's own config database — not the
 filesystem) that runs on every boot to:
 
@@ -161,6 +268,19 @@ docker-compose/coolercontrold/
   scripts/coolercontrold-watchdog.sh   fan failsafe, run every 2 min via cron
   scripts/coolercontrold-backup.sh     manual config backup
 ```
+
+## Related projects
+
+- [ugreen-nas-control](https://github.com/ugreen-nas-control/ugreen-nas-control)
+  (MIT) — an Unraid plugin that drives the same CS201x controller from
+  userspace, and whose fan notes (floor, wiring) informed the
+  [guidelines above](#fan-curves). It takes its register map from the same
+  UGREEN driver this repo builds, so it adds no hardware knowledge beyond it.
+  Its LED backend for the DXP2800 GT is marked untested on hardware; the one
+  here has run on a real unit. It cannot be run alongside this driver (see
+  [Architecture — LEDs](#architecture--leds)).
+- [miskcoo/ugreen_leds_controller](https://github.com/miskcoo/ugreen_leds_controller)
+  — the community LED protocol and tools for other UGREEN models.
 
 ## License
 
